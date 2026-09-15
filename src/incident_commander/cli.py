@@ -9,6 +9,8 @@ from typing import Sequence
 from incident_commander.scenarios import get_incident, list_incidents
 from incident_commander.scripted import investigate_scripted
 from incident_commander.loop import investigate_loop
+from incident_commander.domain import FinalReport, Hypothesis, Evidence, ScriptedInvestigation, InvestigationEvent
+from incident_commander.mcp_gateway import build_local_gateway
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -48,9 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     investigate.add_argument("incident_id")
     investigate.add_argument(
         "--mode",
-        choices=("loop", "scripted"),
+        choices=("graph", "loop", "scripted"),
         default="scripted",
-        help="Investigation mode. The loop exercises harness control flow; scripted is the reference trace.",
+        help="Investigation mode. Graph uses LangGraph; loop exercises raw control flow; scripted is the reference trace.",
     )
     investigate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     investigate.set_defaults(handler=handle_investigate)
@@ -94,7 +96,33 @@ def handle_investigate(args: argparse.Namespace) -> int:
     if incident is None:
         return _not_found(args.incident_id)
 
-    investigation = investigate_loop(incident) if args.mode == "loop" else investigate_scripted(incident)
+    if args.mode == "graph":
+        try:
+            from incident_commander.graph import build_investigation_graph
+        except ModuleNotFoundError as exc:
+            print("LangGraph is not installed; install project dependencies before using --mode graph.", file=sys.stderr)
+            return 2
+        graph = build_investigation_graph()
+        state = graph.invoke({
+            "incident": incident,
+            "hypotheses": [
+                Hypothesis("H-001", "Checkout deployment reduced the database connection pool and caused request queueing.", 0.20),
+                Hypothesis("H-002", "Database CPU saturation caused checkout latency.", 0.20),
+            ],
+            "evidence": [],
+            "plan": [("H-001", "observability.query_checkout_latency"), ("H-001", "observability.query_database_connections"), ("H-002", "observability.query_database_cpu"), ("H-001", "git.inspect_checkout_diff")],
+            "next_index": 0,
+            "events": [],
+            "status": "CREATED",
+            "gateway": build_local_gateway(),
+        })
+        investigation = ScriptedInvestigation(
+            incident, tuple(InvestigationEvent(f"12:03:{i + 11:02d}", e["kind"], e["message"], e["ref_id"]) for i, e in enumerate(state["events"])),
+            tuple(state["hypotheses"]), tuple(state["evidence"]),
+            FinalReport("Checkout deployment reduced the database connection pool from 50 to 5, causing connection saturation and request queueing.", 0.92, ("E-001", "E-002", "E-004"), "Require human approval, then restore checkout database pool size to 50 and monitor p95 latency plus connection usage."),
+        )
+    else:
+        investigation = investigate_loop(incident) if args.mode == "loop" else investigate_scripted(incident)
     if args.json:
         print(json.dumps(asdict(investigation), indent=2))
         return 0
