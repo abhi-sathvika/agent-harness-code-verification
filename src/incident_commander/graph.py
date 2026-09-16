@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 
 from incident_commander.domain import Evidence, Hypothesis, HypothesisStatus, Incident
 from incident_commander.mcp_gateway import MCPGateway, build_local_gateway
+from incident_commander.checkpoints import CheckpointStore
 
 
 class InvestigationState(TypedDict):
@@ -18,6 +19,8 @@ class InvestigationState(TypedDict):
     events: Annotated[list[dict[str, str | None]], operator.add]
     status: str
     gateway: MCPGateway
+    run_id: str
+    checkpoint_store: CheckpointStore
 
 
 def _event(state: InvestigationState, kind: str, message: str, ref_id: str | None = None) -> dict[str, str | None]:
@@ -25,7 +28,9 @@ def _event(state: InvestigationState, kind: str, message: str, ref_id: str | Non
 
 
 def _observe(state: InvestigationState) -> dict:
-    return {"status": "RUNNING", "events": [_event(state, "Observe", state["incident"].symptoms[0])]}
+    update = {"status": "RUNNING", "events": [_event(state, "Observe", state["incident"].symptoms[0])]}
+    _save_checkpoint(state, update)
+    return update
 
 
 def _investigate(state: InvestigationState) -> dict:
@@ -52,7 +57,9 @@ def _investigate(state: InvestigationState) -> dict:
             hypothesis.confidence = 0.12
             hypothesis.status = HypothesisStatus.WEAKENED
             hypothesis.contradicting_evidence_ids.append(evidence.evidence_id)
-    return {"next_index": index + 1, "events": events}
+    update = {"next_index": index + 1, "events": events}
+    _save_checkpoint(state, update)
+    return update
 
 
 def _route(state: InvestigationState) -> str:
@@ -63,10 +70,20 @@ def _verify(state: InvestigationState) -> dict:
     top = next(item for item in state["hypotheses"] if item.hypothesis_id == "H-001")
     top.confidence = 0.92
     top.status = HypothesisStatus.SUPPORTED
-    return {
+    update = {
         "status": "COMPLETED",
         "events": [_event(state, "Verify", "Top hypothesis is supported by three independent observations", "H-001")],
     }
+    _save_checkpoint(state, update)
+    return update
+
+
+def _save_checkpoint(state: InvestigationState, update: dict) -> None:
+    if state.get("checkpoint_store") is None:
+        return
+    snapshot = dict(state)
+    snapshot.update(update)
+    state["checkpoint_store"].save(state["run_id"], state["incident"].incident_id, snapshot.get("status", "RUNNING"), snapshot)
 
 
 def build_investigation_graph():

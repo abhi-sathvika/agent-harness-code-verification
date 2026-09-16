@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from dataclasses import asdict
 from typing import Sequence
 
@@ -11,6 +12,7 @@ from incident_commander.scripted import investigate_scripted
 from incident_commander.loop import investigate_loop
 from incident_commander.domain import FinalReport, Hypothesis, Evidence, ScriptedInvestigation, InvestigationEvent
 from incident_commander.mcp_gateway import build_local_gateway
+from incident_commander.checkpoints import CheckpointStore
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -55,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Investigation mode. Graph uses LangGraph; loop exercises raw control flow; scripted is the reference trace.",
     )
     investigate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    investigate.add_argument("--checkpoint-db", help="Persist the run snapshot to a SQLite database.")
     investigate.set_defaults(handler=handle_investigate)
 
     return parser
@@ -96,6 +99,8 @@ def handle_investigate(args: argparse.Namespace) -> int:
     if incident is None:
         return _not_found(args.incident_id)
 
+    run_id = f"run-{uuid.uuid4().hex[:12]}"
+    checkpoint_store = CheckpointStore(args.checkpoint_db) if args.checkpoint_db else None
     if args.mode == "graph":
         try:
             from incident_commander.graph import build_investigation_graph
@@ -115,6 +120,8 @@ def handle_investigate(args: argparse.Namespace) -> int:
             "events": [],
             "status": "CREATED",
             "gateway": build_local_gateway(),
+            "run_id": run_id,
+            "checkpoint_store": checkpoint_store,
         })
         investigation = ScriptedInvestigation(
             incident, tuple(InvestigationEvent(f"12:03:{i + 11:02d}", e["kind"], e["message"], e["ref_id"]) for i, e in enumerate(state["events"])),
@@ -123,6 +130,9 @@ def handle_investigate(args: argparse.Namespace) -> int:
         )
     else:
         investigation = investigate_loop(incident) if args.mode == "loop" else investigate_scripted(incident)
+    if checkpoint_store:
+        checkpoint_store.save(run_id, incident.incident_id, "COMPLETED", asdict(investigation))
+        checkpoint_store.close()
     if args.json:
         print(json.dumps(asdict(investigation), indent=2))
         return 0

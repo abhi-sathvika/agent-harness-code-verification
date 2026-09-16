@@ -3,6 +3,7 @@ from __future__ import annotations
 from incident_commander.cli import main
 from incident_commander.mcp_gateway import build_local_gateway
 from incident_commander.scenarios import get_incident
+from incident_commander.checkpoints import CheckpointStore
 
 
 def test_incidents_list(capsys):
@@ -79,3 +80,22 @@ def test_mcp_gateway_discovers_and_routes_tools():
     assert result.evidence is not None
     assert result.evidence.evidence_id == "E-002"
     assert gateway.invoke("unknown.query", incident).error == "MCP server not found: unknown"
+
+
+def test_checkpoint_store_round_trips_state(tmp_path):
+    store = CheckpointStore(str(tmp_path / "runs.db"))
+    store.save("run-1", "INC-001", "RUNNING", {"next_index": 2, "events": []})
+    loaded = store.load("run-1")
+    store.close()
+
+    assert loaded == {"run_id": "run-1", "incident_id": "INC-001", "status": "RUNNING", "state": {"next_index": 2, "events": []}}
+
+
+def test_graph_writes_node_boundary_checkpoint(tmp_path, capsys):
+    db = str(tmp_path / "runs.db")
+    assert main(["investigate", "INC-001", "--mode", "graph", "--checkpoint-db", db]) == 0
+    store = CheckpointStore(db)
+    rows = store.connection.execute("select status from checkpoints").fetchall()
+    store.close()
+    capsys.readouterr()
+    assert rows == [("COMPLETED",)]
