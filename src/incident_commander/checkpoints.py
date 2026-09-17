@@ -48,5 +48,21 @@ class CheckpointStore:
             return None
         return {"run_id": row[0], "incident_id": row[1], "status": row[2], "state": json.loads(row[3])}
 
+    def list_runs(self) -> list[dict[str, str]]:
+        rows = self.connection.execute(
+            "SELECT run_id, incident_id, status FROM checkpoints ORDER BY run_id"
+        ).fetchall()
+        return [{"run_id": row[0], "incident_id": row[1], "status": row[2]} for row in rows]
+
+    def load_by_approval(self, approval_id: str) -> dict[str, Any] | None:
+        rows = self.connection.execute(
+            "SELECT run_id, incident_id, status, state_json FROM checkpoints"
+        ).fetchall()
+        for row in rows:
+            state = json.loads(row[3])
+            if state.get("approval_id") == approval_id:
+                return {"run_id": row[0], "incident_id": row[1], "status": row[2], "state": state}
+        return None
+
     def close(self) -> None:
         self.connection.close()

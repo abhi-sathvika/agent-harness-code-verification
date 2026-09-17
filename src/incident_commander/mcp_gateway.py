@@ -5,6 +5,7 @@ from typing import Callable
 
 from incident_commander.domain import Incident, ToolResult
 from incident_commander.tools import run_tool
+from incident_commander.kubernetes import inspect_checkout_workload
 
 ToolHandler = Callable[[Incident], ToolResult]
 
@@ -62,4 +63,7 @@ def build_local_gateway() -> MCPGateway:
     git = MCPServer("git", (
         ToolSpec("inspect_checkout_diff", "Inspect the checkout deployment diff", "git", lambda incident: run_tool("inspect_checkout_diff", incident)),
     ))
-    return MCPGateway((observability, git))
+    kubernetes = MCPServer("kubernetes", (
+        ToolSpec("inspect_checkout_workload", "Inspect simulated checkout Kubernetes workload health", "kubernetes", inspect_checkout_workload),
+    ))
+    return MCPGateway((observability, git, kubernetes))
