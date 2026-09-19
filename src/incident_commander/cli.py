@@ -10,6 +10,7 @@ from typing import Sequence
 from incident_commander.scenarios import get_incident, list_incidents
 from incident_commander.scripted import investigate_scripted
 from incident_commander.loop import investigate_loop
+from incident_commander.parallel import investigate_parallel
 from incident_commander.domain import (
     Evidence, FinalReport, Hypothesis, HypothesisStatus, InvestigationEvent, ScriptedInvestigation,
 )
@@ -67,9 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     investigate.add_argument("incident_id")
     investigate.add_argument(
         "--mode",
-        choices=("graph", "loop", "scripted"),
+        choices=("graph", "loop", "parallel", "scripted"),
         default="scripted",
-        help="Investigation mode. Graph uses LangGraph; loop exercises raw control flow; scripted is the reference trace.",
+        help="Investigation mode. Graph uses LangGraph; parallel fans out specialist workers; loop exercises raw control flow; scripted is the reference trace.",
     )
     investigate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     investigate.add_argument("--checkpoint-db", help="Persist the run snapshot to a SQLite database.")
@@ -144,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_benchmark.add_argument("benchmark_id", choices=("checkout-latency",))
     evaluate_benchmark.add_argument(
         "--mode",
-        choices=("graph", "loop", "scripted"),
+        choices=("graph", "loop", "parallel", "scripted"),
         default="graph",
         help="Harness mode to evaluate.",
     )
@@ -155,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate_benchmark.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     evaluate_benchmark.set_defaults(handler=handle_evaluate_benchmark)
+
+    evaluate_compare = evaluate_commands.add_parser("compare", help="Compare harness modes on a benchmark case.")
+    evaluate_compare.add_argument("benchmark_id", choices=("checkout-latency",))
+    evaluate_compare.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    evaluate_compare.set_defaults(handler=handle_evaluate_compare)
 
     return parser
 
@@ -221,7 +227,10 @@ def handle_investigate(args: argparse.Namespace) -> int:
         trace_graph_state(args.trace_file, state)
         return _emit_graph_result(state, args.json, checkpoint_store)
     else:
-        investigation = investigate_loop(incident) if args.mode == "loop" else investigate_scripted(incident)
+        if args.mode == "parallel":
+            investigation = investigate_parallel(incident)
+        else:
+            investigation = investigate_loop(incident) if args.mode == "loop" else investigate_scripted(incident)
     if checkpoint_store:
         checkpoint_store.save(run_id, incident.incident_id, "COMPLETED", asdict(investigation))
         checkpoint_store.close()
@@ -367,27 +376,7 @@ def handle_approvals_approve(args: argparse.Namespace) -> int:
 
 
 def handle_evaluate_benchmark(args: argparse.Namespace) -> int:
-    incident = get_incident("INC-001")
-    assert incident is not None
-    if args.mode == "scripted":
-        investigation = investigate_scripted(incident)
-        status = "COMPLETED"
-        tool_calls = None
-    elif args.mode == "loop":
-        investigation = investigate_loop(incident)
-        status = "COMPLETED"
-        tool_calls = None
-    else:
-        state = _run_graph(_initial_graph_state(
-            incident,
-            "eval-checkout-latency",
-            None,
-            include_kubernetes=args.include_kubernetes,
-        ))
-        investigation = _investigation_from_graph_state(state)
-        status = state["status"]
-        tool_calls = state.get("tool_calls_made", 0)
-    result = evaluate_investigation(investigation, args.mode, status, tool_calls)
+    result = _evaluate_checkout_latency(args.mode, args.include_kubernetes)
     payload = asdict(result)
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -403,6 +392,51 @@ def handle_evaluate_benchmark(args: argparse.Namespace) -> int:
     print(f"False hypotheses: {result.false_hypothesis_count}")
     print(f"Tool calls: {result.tool_calls}")
     return 0
+
+
+def handle_evaluate_compare(args: argparse.Namespace) -> int:
+    results = [
+        _evaluate_checkout_latency("scripted", False),
+        _evaluate_checkout_latency("loop", False),
+        _evaluate_checkout_latency("graph", False),
+        _evaluate_checkout_latency("graph+kubernetes", True),
+        _evaluate_checkout_latency("parallel", False),
+    ]
+    payload = [asdict(result) for result in results]
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(f"Benchmark: {args.benchmark_id}")
+    print("Mode              Passed  Evidence  Tool calls  False hypotheses")
+    for result in results:
+        print(
+            f"{result.mode:<17} {str(result.passed).lower():<7} "
+            f"{result.evidence_correctness:.2f}      {result.tool_calls:<10} {result.false_hypothesis_count}"
+        )
+    return 0
+
+
+def _evaluate_checkout_latency(mode: str, include_kubernetes: bool):
+    incident = get_incident("INC-001")
+    assert incident is not None
+    if mode == "scripted":
+        investigation = investigate_scripted(incident)
+        return evaluate_investigation(investigation, mode)
+    if mode == "loop":
+        investigation = investigate_loop(incident)
+        return evaluate_investigation(investigation, mode)
+    if mode == "parallel":
+        investigation = investigate_parallel(incident)
+        return evaluate_investigation(investigation, mode)
+    state = _run_graph(_initial_graph_state(
+        incident,
+        "eval-checkout-latency",
+        None,
+        include_kubernetes=include_kubernetes,
+    ))
+    investigation = _investigation_from_graph_state(state)
+    result_mode = "graph+kubernetes" if include_kubernetes else mode
+    return evaluate_investigation(investigation, result_mode, state["status"], state.get("tool_calls_made", 0))
 
 
 def _run_graph(state: dict) -> dict:

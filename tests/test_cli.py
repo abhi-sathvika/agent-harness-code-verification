@@ -282,6 +282,17 @@ def test_graph_can_inspect_simulated_kubernetes_workload(capsys):
     assert "E-001, E-002, E-004" in captured.out
 
 
+def test_parallel_investigation_merges_subagent_evidence(capsys):
+    assert main(["investigate", "INC-001", "--mode", "parallel"]) == 0
+    captured = capsys.readouterr()
+    assert "Merged findings from metrics-agent" in captured.out
+    assert "Merged findings from change-agent" in captured.out
+    assert "Merged findings from platform-agent" in captured.out
+    assert "metrics-agent -> query_database_connections()" in captured.out
+    assert "platform-agent -> inspect_checkout_workload()" in captured.out
+    assert "E-001, E-002, E-004" in captured.out
+
+
 def test_graph_writes_local_trace_records(tmp_path, capsys):
     trace_file = tmp_path / "trace.jsonl"
 
@@ -356,3 +367,33 @@ def test_evaluate_benchmark_json_includes_kubernetes_experiment(capsys):
     assert payload["root_cause_correct"] is True
     assert payload["required_evidence_found"] is True
     assert payload["tool_calls"] == 5
+
+
+def test_evaluate_benchmark_scores_parallel_harness(capsys):
+    assert main(["evaluate", "benchmark", "checkout-latency", "--mode", "parallel", "--json"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["passed"] is True
+    assert payload["mode"] == "parallel"
+    assert payload["tool_calls"] == 5
+
+
+def test_evaluate_compare_reports_all_harness_modes(capsys):
+    assert main(["evaluate", "compare", "checkout-latency"]) == 0
+    captured = capsys.readouterr()
+    assert "Mode              Passed" in captured.out
+    assert "scripted" in captured.out
+    assert "loop" in captured.out
+    assert "graph" in captured.out
+    assert "graph+kubernetes" in captured.out
+    assert "parallel" in captured.out
+
+
+def test_evaluate_compare_json_includes_experiment_rows(capsys):
+    assert main(["evaluate", "compare", "checkout-latency", "--json"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    modes = [row["mode"] for row in payload]
+    assert modes == ["scripted", "loop", "graph", "graph+kubernetes", "parallel"]
+    assert all(row["passed"] for row in payload)
+    assert payload[3]["tool_calls"] == 5
